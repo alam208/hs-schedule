@@ -86,6 +86,36 @@ def parse_city_state_from_text(text):
     if m: return m.group(1).strip(), m.group(2).strip()
     return "", ""
 
+def _is_placeholder_team(name: str) -> bool:
+    v = (name or "").strip().lower()
+    return v in ("", "team a", "team b", "team")
+
+def _is_meaningful(ev: dict) -> bool:
+    # nama tim valid
+    if _is_placeholder_team(ev.get("teamA")) or _is_placeholder_team(ev.get("teamB")):
+        return False
+    # ada info tambahan
+    for k in ("kick", "venue", "city", "state", "description"):
+        val = ev.get(k)
+        if isinstance(val, str) and val.strip():
+            return True
+    return False
+
+def _prune_empty_fields(ev: dict) -> dict:
+    """Hapus key bernilai kosong: '', None, '#'(untuk link placeholder)."""
+    keep = {}
+    for k, v in ev.items():
+        if v is None:
+            continue
+        if isinstance(v, str):
+            vs = v.strip()
+            if vs == "" or vs == "#":
+                continue
+            keep[k] = vs
+        else:
+            keep[k] = v
+    return keep
+
 # ---------------- Halaman game (1 request per game) ----------------
 def parse_game_page(url, session, default_year, ref_date_ymd, state_hint=""):
     r = get(url, session)
@@ -171,15 +201,19 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
             pass
 
     results = []
-    # Concurrency moderat (request ringan)
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd, state_code.upper()) for u in links]
-        for f in as_completed(futs):
-            try:
-                results.append(f.result())
-            except Exception:
-                pass
-    return results
+with ThreadPoolExecutor(max_workers=6) as ex:
+    futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd, state_code.upper()) for u in links]
+    for f in as_completed(futs):
+        try:
+            ev = f.result()
+            if not _is_meaningful(ev):
+                continue            # <-- buang entri “kosong”
+            ev = _prune_empty_fields(ev)  # <-- hapus field kosong
+            results.append(ev)
+        except Exception:
+            pass
+return results
+
 
 # ---------------- Orchestrator ----------------
 def scrape_all(date_str="9/26/2025", states=None):
