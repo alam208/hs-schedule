@@ -11,7 +11,7 @@ on:
         description: 'Kode state dipisah koma (kosong = semua), contoh: nj,wy,tx'
         required: false
         default: ''
-  # (Opsional) Jalankan otomatis tiap Jumat 17:00 US/Eastern (≈21:00 UTC; sesuaikan DST)
+  # (Opsional) Otomatis tiap Jumat 21:00 UTC (~17:00 ET saat DST)
   schedule:
     - cron: '0 21 * * FRI'
 
@@ -20,7 +20,6 @@ permissions:
   pages: write
   id-token: write
 
-# Hanya izinkan 1 run pada satu waktu; run baru akan membatalkan yang lama
 concurrency:
   group: scrape-pages
   cancel-in-progress: true
@@ -39,7 +38,6 @@ jobs:
         with:
           python-version: '3.11'
 
-      # Cache pip agar lebih cepat
       - name: Cache pip
         uses: actions/cache@v4
         with:
@@ -48,7 +46,6 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
 
-      # Cache Playwright browsers agar step install lebih cepat di run berikutnya
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -58,7 +55,6 @@ jobs:
       - name: Install Python deps
         run: pip install -r scraper/requirements.txt
 
-      # Penting: Install Chromium untuk Playwright
       - name: Install Playwright browsers (Chromium)
         run: python -m playwright install --with-deps chromium
 
@@ -68,14 +64,11 @@ jobs:
           echo "date=${{ github.event.inputs.date }}" >> $GITHUB_OUTPUT
           echo "states=${{ github.event.inputs.states }}" >> $GITHUB_OUTPUT
 
-      # Jalankan scraper
-      # Catatan:
-      # - LIMIT_PER_STATE: batasi jumlah game per state saat testing (hapus/buat kosong untuk full)
-      # - NO_PLAYWRIGHT: set "1" untuk mematikan fallback Playwright saat test cepat (hapus untuk aktifkan lagi)
+      # NOTE: kalau mau testing cepat, bisa tambahkan env di bawah:
+      #   env:
+      #     LIMIT_PER_STATE: "20"
+      #     NO_PLAYWRIGHT: "1"
       - name: Run scraper
-        env:
-          # LIMIT_PER_STATE: "20"
-          # NO_PLAYWRIGHT: "1"
         run: |
           set -e
           python scraper/maxpreps_to_json.py \
