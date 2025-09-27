@@ -1,19 +1,18 @@
 name: Scrape MaxPreps → JSON → Pages
 
 on:
+  schedule:
+    - cron: "0 8 * * *"   # 08:00 UTC ≈ 04:00 ET
   workflow_dispatch:
     inputs:
       date:
-        description: 'Tanggal (mm/dd/YYYY), contoh: 10/03/2025'
-        required: true
-        default: '10/03/2025'
-      states:
-        description: 'Kode state dipisah koma (kosong = semua), contoh: nj,wy,tx'
+        description: "Date mm/dd/YYYY (MaxPreps format, US ET)"
         required: false
-        default: ''
-  # (Opsional) Jalankan otomatis tiap Jumat 16:00 US/Eastern (20:00 UTC saat DST)
-  schedule:
-    - cron: '0 20 * * FRI'
+        default: ""
+      states:
+        description: "Comma-separated states (e.g. tx,ca,fl). Empty = all"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -21,53 +20,57 @@ permissions:
   id-token: write
 
 concurrency:
-  group: scrape-pages
-  cancel-in-progress: true
+  group: "scrape-pages"
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-
+    env:
+      TZ: America/New_York
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      # (Opsional) Cache pip agar lebih cepat
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('scraper/requirements.txt') }}
-          restore-keys: |
-            pip-${{ runner.os }}-
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r scraper/requirements.txt
 
-      - name: Install Python deps
-        run: pip install -r scraper/requirements.txt
-
-      # >>> PENTING: install browser Playwright sebelum menjalankan scraper <<<
-      - name: Install Playwright browsers (Chromium)
-        run: python -m playwright install --with-deps chromium
-
-      - name: Parse inputs
+      - name: Resolve date & states (US ET)
         id: args
         run: |
-          echo "date=${{ github.event.inputs.date }}" >> $GITHUB_OUTPUT
-          echo "states=${{ github.event.inputs.states }}" >> $GITHUB_OUTPUT
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            DATE_IN="${{ github.event.inputs.date }}"
+          else
+            DATE_IN=$(date +"%m/%d/%Y")   # today (ET)
+          fi
+          if [ -n "${{ github.event.inputs.states }}" ]; then
+            STATES_IN="${{ github.event.inputs.states }}"
+          else
+            STATES_IN=""
+          fi
+          echo "date=${DATE_IN}"   >> $GITHUB_OUTPUT
+          echo "states=${STATES_IN}" >> $GITHUB_OUTPUT
+          echo "Using ET date=$DATE_IN states=$STATES_IN"
 
-      - name: Run scraper
+      - name: Disable Jekyll processing
+        run: |
+          touch .nojekyll
+
+      - name: Run scraper (today)
         run: |
           python scraper/maxpreps_to_json.py \
             --date "${{ steps.args.outputs.date }}" \
             $([ -n "${{ steps.args.outputs.states }}" ] && echo --states "${{ steps.args.outputs.states }}") \
-            --outdir data
-          ls -lah data || true
+            --outdir "data"
 
-      - name: Upload Pages artifact
+      - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
         with:
           path: .
@@ -77,6 +80,8 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
+        id: deployment
         uses: actions/deploy-pages@v4
