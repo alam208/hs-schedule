@@ -4,13 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       date:
-        description: "Tanggal (mm/dd/YYYY)"
+        description: 'Tanggal (mm/dd/YYYY), contoh: 10/03/2025'
         required: true
-        default: "10/03/2025"
+        default: '10/03/2025'
       states:
-        description: "Kode state dipisah koma (kosong = semua)"
+        description: 'Kode state dipisah koma (kosong = semua), contoh: nj,wy,tx'
         required: false
-        default: ""
+        default: ''
+  # (Opsional) Jalankan otomatis tiap Jumat 16:00 US/Eastern (20:00 UTC saat DST)
+  schedule:
+    - cron: '0 20 * * FRI'
 
 permissions:
   contents: write
@@ -18,12 +21,13 @@ permissions:
   id-token: write
 
 concurrency:
-  group: "scrape-pages"
+  group: scrape-pages
   cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,13 +35,22 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
+      # (Opsional) Cache pip agar lebih cepat
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('scraper/requirements.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
 
       - name: Install Python deps
         run: pip install -r scraper/requirements.txt
 
-      # >>> INI YANG DITANYAKAN <<<
-      - name: Install Playwright browsers
+      # >>> PENTING: install browser Playwright sebelum menjalankan scraper <<<
+      - name: Install Playwright browsers (Chromium)
         run: python -m playwright install --with-deps chromium
 
       - name: Parse inputs
@@ -52,6 +65,7 @@ jobs:
             --date "${{ steps.args.outputs.date }}" \
             $([ -n "${{ steps.args.outputs.states }}" ] && echo --states "${{ steps.args.outputs.states }}") \
             --outdir data
+          ls -lah data || true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
