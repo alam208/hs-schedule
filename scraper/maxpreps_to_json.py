@@ -1,3 +1,4 @@
+# scraper/maxpreps_to_json.py
 import json, re, time, random, argparse, os, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
@@ -21,7 +22,7 @@ STATE_CODES = [
 BASE = "https://www.maxpreps.com"
 SPORT = "football"
 
-TEAM_CACHE = {}  # cache enrichment tim dari halaman tim
+TEAM_CACHE = {}  # cache enrichment dari halaman tim
 
 # ---------------- HTTP ----------------
 def get(url, session, retries=3, backoff=1.7):
@@ -33,7 +34,7 @@ def get(url, session, retries=3, backoff=1.7):
     r.raise_for_status()
     return r
 
-# ---------------- Helpers ----------------
+# ---------------- Helpers (HTML) ----------------
 def ldjson_first(soup):
     for tag in soup.select('script[type="application/ld+json"]'):
         try:
@@ -141,6 +142,55 @@ def parse_city_state_from_parens(text):
         return m.group(1).strip(), m.group(2).strip()
     return "", ""
 
+# ---------------- Helpers (Playwright) ----------------
+def try_playwright_get_images(url, selectors=None, timeout_ms=60000):
+    """
+    Render halaman dengan Chromium headless, lalu kumpulkan URL gambar dari selector:
+    - background-image (computed style)
+    - <img src> dan srcset
+    Return: list[str] unik
+    """
+    selectors = selectors or [
+        ".mascot-image",
+        ".team-overview__logo",
+        ".team-details__logo",
+        ".team-logo",
+        ".school-logo",
+        ".avatar",
+        "img[alt*='logo' i]",
+        "img"
+    ]
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(url, timeout=timeout_ms)
+            page.wait_for_load_state("networkidle")
+            urls = set()
+            for sel in selectors:
+                for el in page.query_selector_all(sel):
+                    # background-image
+                    try:
+                        style = el.evaluate("e => getComputedStyle(e).backgroundImage")
+                        if style and "url(" in style:
+                            m = re.search(r"url\\((['\\\"]?)(.*?)\\1\\)", style)
+                            if m and m.group(2):
+                                urls.add(m.group(2))
+                    except Exception:
+                        pass
+                    # img src / srcset
+                    src = el.get_attribute("src")
+                    if src: urls.add(src)
+                    srcset = el.get_attribute("srcset")
+                    if srcset:
+                        first = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+                        if first: urls.add(first)
+            browser.close()
+            return list(urls)
+    except Exception:
+        return []
+
 # ---------------- Enrichment dari halaman tim ----------------
 def parse_team_page(team_url, session):
     if not team_url:
@@ -185,6 +235,16 @@ def parse_team_page(team_url, session):
             m_state_url = re.search(r"/([a-z]{2})/", team_url)
             if m_state_url:
                 out["state"] = m_state_url.group(1).upper()
+
+        # Fallback Playwright kalau logo/mascotImg belum ada
+        if not out["logo"] or not out["mascotImg"]:
+            imgs = try_playwright_get_images(team_url)
+            if imgs:
+                if not out["mascotImg"]:
+                    out["mascotImg"] = next((u for u in imgs if "school-mascot" in u), out["mascotImg"])
+                if not out["logo"]:
+                    out["logo"] = next((u for u in imgs if ("school" in u or "logo" in u) and "mascot" not in u), out["logo"])
+
     except Exception:
         pass
     TEAM_CACHE[team_url] = out
@@ -267,6 +327,21 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
     if not mascotImgA: mascotImgA = enrichA.get("mascotImg", "")
     if not mascotImgB: mascotImgB = enrichB.get("mascotImg", "")
 
+    # --- Fallback Playwright kalau masih kosong ---
+    need_pw = (not logoA) or (not logoB) or (not mascotImgA) or (not mascotImgB)
+    if need_pw:
+        pw_imgs = try_playwright_get_images(url)
+        if pw_imgs:
+            if not mascotImgA:
+                mascotImgA = next((u for u in pw_imgs if "school-mascot" in u), mascotImgA)
+            if not mascotImgB:
+                mascotImgB = next((u for u in pw_imgs if "school-mascot" in u and u != mascotImgA), mascotImgB)
+
+            if not logoA:
+                logoA = next((u for u in pw_imgs if ("school" in u or "logo" in u) and "mascot" not in u), logoA)
+            if not logoB:
+                logoB = next((u for u in pw_imgs if ("school" in u or "logo" in u) and u != logoA and "mascot" not in u), logoB)
+
     # City/State prioritas dari team page → venue → deskripsi
     city = enrichA.get("city") or enrichB.get("city") or ""
     state = enrichA.get("state") or enrichB.get("state") or ""
@@ -302,8 +377,8 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
         "mascotB": mascotB or "",
         "mascotImgA": mascotImgA or "",
         "mascotImgB": mascotImgB or "",
-        "mascotLetterA": mascotLetterA or "",
-        "mascotLetterB": mascotLetterB or "",
+        "mascotLetterA": text_one(soup, 'div.team-overview__team:nth-of-type(1) .mascot-image--letter'),
+        "mascotLetterB": text_one(soup, 'div.team-overview__team:nth-of-type(2) .mascot-image--letter'),
         "description": desc or ""
     }
 
@@ -323,7 +398,8 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
 
     links = sorted(set(links))
     results = []
-    with ThreadPoolExecutor(max_workers=4) as ex:  # lebih rendah karena enrichment ke team page
+    # max_workers moderat karena tiap game bisa trigger headless fallback
+    with ThreadPoolExecutor(max_workers=4) as ex:
         futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd) for u in links]
         for f in as_completed(futs):
             try:
