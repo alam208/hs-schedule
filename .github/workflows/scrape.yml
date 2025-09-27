@@ -1,4 +1,4 @@
-name: Scrape MaxPreps → JSON → Pages
+name: Scrape MaxPreps → JSON → Pages (FULL)
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
         description: 'Kode state dipisah koma (kosong = semua), contoh: nj,wy,tx'
         required: false
         default: ''
-  # (Opsional) Otomatis tiap Jumat 21:00 UTC (~17:00 ET saat DST)
+  # (Opsional) otomatis Jumat 21:00 UTC (~17:00 ET saat DST)
   schedule:
     - cron: '0 21 * * FRI'
 
@@ -46,17 +46,8 @@ jobs:
           restore-keys: |
             pip-${{ runner.os }}-
 
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: msplaywright-${{ runner.os }}-chromium
-
       - name: Install Python deps
         run: pip install -r scraper/requirements.txt
-
-      - name: Install Playwright browsers (Chromium)
-        run: python -m playwright install --with-deps chromium
 
       - name: Parse inputs
         id: args
@@ -64,11 +55,7 @@ jobs:
           echo "date=${{ github.event.inputs.date }}" >> $GITHUB_OUTPUT
           echo "states=${{ github.event.inputs.states }}" >> $GITHUB_OUTPUT
 
-      # NOTE: kalau mau testing cepat, bisa tambahkan env di bawah:
-      #   env:
-      #     LIMIT_PER_STATE: "20"
-      #     NO_PLAYWRIGHT: "1"
-      - name: Run scraper
+      - name: Run scraper (FULL, no limit)
         run: |
           set -e
           python scraper/maxpreps_to_json.py \
