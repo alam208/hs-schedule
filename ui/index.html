@@ -14,15 +14,12 @@
     button{cursor:pointer}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:14px}
-    .teams{display:flex;align-items:center;gap:8px;font-weight:600}
-    .vs{color:#94a3b8}
+    .teams{display:flex;align-items:center;gap:8px;font-weight:700}
     .meta{margin-top:8px;color:#475569;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
     .desc{margin-top:8px;color:#334155;font-size:14px;line-height:1.45}
-    .badge{width:38px;height:38px;border-radius:999px;display:grid;place-items:center;background:#f1f5f9;border:1px solid #e2e8f0}
-    .state-title{font-weight:700;margin:18px 0 8px}
+    .state-title{font-weight:800;margin:18px 0 8px}
     footer{color:#94a3b8;text-align:center;padding:28px 12px}
     @media (max-width:800px){.controls{grid-template-columns:1fr} .grid{grid-template-columns:1fr}}
-    img.logo{width:38px;height:38px;border-radius:999px;object-fit:cover;border:1px solid #e2e8f0;background:white}
   </style>
   <!-- dayjs + timezone (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
@@ -99,14 +96,6 @@
     const yyyy=d.year(), mm=String(d.month()+1).padStart(2,'0'), dd=String(d.date()).padStart(2,'0');
     return `${PAGES_BASE}/data/hsfb-${yyyy}-${mm}-${dd}.json`;
   }
-
-  function badge(team, mascotImg, logo, letter){
-    const img = mascotImg || logo || "";
-    if (img) return `<img class="logo" src="${img}" alt="${team} logo" loading="lazy" />`;
-    const init = (letter || (team||'').split(' ').map(s=>s[0]).slice(0,2).join('') || '?').toUpperCase();
-    return `<div class="badge">${init}</div>`;
-  }
-
   function fmtKick(iso, tz){
     if(!iso) return "TBA";
     try{
@@ -114,6 +103,32 @@
       return m.isValid()? m.format("ddd, MMM D • h:mm A") : "TBA";
     }catch{ return "TBA"; }
   }
+  const isDefaultTeam = (s) => {
+    const v = (s||"").trim().toLowerCase();
+    return v === "" || v === "team a" || v === "team b" || v === "team";
+  };
+  const isMeaningful = (ev) => {
+    // Wajib: kedua nama tim valid (bukan placeholder)
+    if (isDefaultTeam(ev.teamA) || isDefaultTeam(ev.teamB)) return false;
+    // Minimal ada salah satu informasi tambahan
+    const hasAny = (ev.kick && ev.kick.trim() !== "") ||
+                   (ev.description && ev.description.trim() !== "") ||
+                   (ev.venue && ev.venue.trim() !== "") ||
+                   (ev.city && ev.city.trim() !== "") ||
+                   (ev.state && ev.state.trim() !== "");
+    return !!hasAny;
+  };
+  const teamLine = (name, mascot) => {
+    const nm = (name||"").trim();
+    const mc = (mascot||"").trim();
+    return mc ? `${nm} (${mc})` : nm;
+  };
+  const locText = (ev) => {
+    if (ev.venue && ev.venue.trim() !== "") return ev.venue;
+    if (ev.city && ev.state) return `${ev.city}, ${ev.state}`;
+    if (ev.state) return ev.state;
+    return "—";
+  };
 
   async function load(){
     const tz = tzSel.value;
@@ -126,34 +141,38 @@
     try{
       const res = await fetch(url, {cache:'no-store'});
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      statusEl.textContent = "";
+      const raw = await res.json();
 
+      // 1) buang entri kosong/placeholder
+      let data = (Array.isArray(raw)? raw:[]).filter(isMeaningful);
+
+      // 2) filter UI
       const q = (qInput.value||'').toLowerCase().trim();
       const st = (stateSel.value||'').toUpperCase();
       const onlyUpcoming = upcomingChk.checked;
       const now = dayjs().tz(tz);
 
-      const filtered = (Array.isArray(data)? data:[]).filter(ev=>{
-        if (st && (ev.state||'').toUpperCase()!==st) return false;
-        if (q) {
-          const blob = [ev.teamA, ev.teamB, ev.city, ev.school, ev.description].join(' ').toLowerCase();
-          if (!blob.includes(q)) return false;
-        }
-        if (onlyUpcoming && ev.kick){
+      if (st) data = data.filter(ev => (ev.state||'').toUpperCase() === st);
+      if (q) {
+        data = data.filter(ev => {
+          const blob = [ev.teamA, ev.teamB, ev.city, ev.state, ev.description].join(' ').toLowerCase();
+          return blob.includes(q);
+        });
+      }
+      if (onlyUpcoming) {
+        data = data.filter(ev=>{
+          if (!ev.kick) return true; // biarkan TBA lewat (opsional: ganti ke false kalau mau sembunyikan)
           const m = /z$/i.test(ev.kick) ? dayjs.utc(ev.kick).tz(tz) : dayjs.tz(ev.kick, tz);
-          if (m.isValid() && m.isBefore(now)) return false;
-        }
-        return true;
-      });
+          return !m.isValid() || m.isAfter(now);
+        });
+      }
 
-      // group by state
+      // group by state + sort time
       const byState = {};
-      for(const ev of filtered){
+      for(const ev of data){
         const s = (ev.state||'').toUpperCase();
         (byState[s] ||= []).push(ev);
       }
-      // sort each group by time
       Object.values(byState).forEach(arr=>{
         arr.sort((a,b)=>{
           const ta = a.kick ? (/z$/i.test(a.kick)? dayjs.utc(a.kick).valueOf(): dayjs(a.kick).valueOf()) : 0;
@@ -163,6 +182,7 @@
       });
 
       const states = Object.keys(byState).sort();
+      statusEl.textContent = "";
       if (states.length===0){
         root.innerHTML = `<div style="color:#64748b">No games found for this filter.</div>`;
         return;
@@ -172,15 +192,11 @@
         const cards = byState[st].map(ev=>`
           <div class="card">
             <div class="teams">
-              ${badge(ev.teamA, ev.mascotImgA, ev.logoA, ev.mascotLetterA)}
-              <div>${ev.teamA||''}</div>
-              <div class="vs">vs</div>
-              ${badge(ev.teamB, ev.mascotImgB, ev.logoB, ev.mascotLetterB)}
-              <div>${ev.teamB||''}</div>
+              ${teamLine(ev.teamA, ev.mascotA)} <span style="color:#94a3b8;margin:0 6px">vs</span> ${teamLine(ev.teamB, ev.mascotB)}
             </div>
             <div class="meta">
               <div>🕒 ${fmtKick(ev.kick, tz)}</div>
-              <div>📍 ${ev.venue || [ev.city, ev.state].filter(Boolean).join(', ') || '—'}</div>
+              <div>📍 ${locText(ev)}</div>
             </div>
             ${ev.description? `<p class="desc">${ev.description}</p>`: ''}
           </div>
@@ -190,7 +206,6 @@
           <div class="grid">${cards}</div>
         </div>`;
       }).join('');
-
     }catch(err){
       statusEl.textContent = "Failed to load JSON. Make sure the date exists.";
       console.error(err);
