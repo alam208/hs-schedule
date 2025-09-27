@@ -1,16 +1,14 @@
 name: Scrape MaxPreps → JSON → Pages
 
 on:
-  schedule:
-    - cron: "0 8 * * *"   # 08:00 UTC ≈ 04:00 ET
   workflow_dispatch:
     inputs:
       date:
-        description: "Date mm/dd/YYYY (MaxPreps format, US ET)"
-        required: false
-        default: ""
+        description: "Tanggal (mm/dd/YYYY)"
+        required: true
+        default: "10/03/2025"
       states:
-        description: "Comma-separated states (e.g. tx,ca,fl). Empty = all"
+        description: "Kode state dipisah koma (kosong = semua)"
         required: false
         default: ""
 
@@ -21,56 +19,41 @@ permissions:
 
 concurrency:
   group: "scrape-pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      TZ: America/New_York
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r scraper/requirements.txt
+      - name: Install Python deps
+        run: pip install -r scraper/requirements.txt
 
-      - name: Resolve date & states (US ET)
+      # >>> INI YANG DITANYAKAN <<<
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      - name: Parse inputs
         id: args
         run: |
-          if [ -n "${{ github.event.inputs.date }}" ]; then
-            DATE_IN="${{ github.event.inputs.date }}"
-          else
-            DATE_IN=$(date +"%m/%d/%Y")   # today (ET)
-          fi
-          if [ -n "${{ github.event.inputs.states }}" ]; then
-            STATES_IN="${{ github.event.inputs.states }}"
-          else
-            STATES_IN=""
-          fi
-          echo "date=${DATE_IN}"   >> $GITHUB_OUTPUT
-          echo "states=${STATES_IN}" >> $GITHUB_OUTPUT
-          echo "Using ET date=$DATE_IN states=$STATES_IN"
+          echo "date=${{ github.event.inputs.date }}" >> $GITHUB_OUTPUT
+          echo "states=${{ github.event.inputs.states }}" >> $GITHUB_OUTPUT
 
-      - name: Disable Jekyll processing
-        run: |
-          touch .nojekyll
-
-      - name: Run scraper (today)
+      - name: Run scraper
         run: |
           python scraper/maxpreps_to_json.py \
             --date "${{ steps.args.outputs.date }}" \
             $([ -n "${{ steps.args.outputs.states }}" ] && echo --states "${{ steps.args.outputs.states }}") \
-            --outdir "data"
+            --outdir data
 
-      - name: Upload artifact for Pages
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: .
@@ -80,8 +63,6 @@ jobs:
     runs-on: ubuntu-latest
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
