@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>HS Sports — Schedule</title>
+  <title>HS Sports — Schedule (UI v2)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a}
@@ -14,7 +14,7 @@
     button{cursor:pointer}
     .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
     .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:14px}
-    .teams{display:flex;align-items:center;gap:8px;font-weight:700}
+    .teams{font-weight:800}
     .meta{margin-top:8px;color:#475569;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
     .desc{margin-top:8px;color:#334155;font-size:14px;line-height:1.45}
     .state-title{font-weight:800;margin:18px 0 8px}
@@ -31,6 +31,7 @@
   <div class="wrap row" style="justify-content:space-between">
     <div class="row" style="gap:10px">
       <strong>High School Sports — Schedule</strong>
+      <span style="color:#64748b;font-size:12px">UI v2</span>
     </div>
     <div class="row">
       <label>US TZ:
@@ -103,32 +104,30 @@
       return m.isValid()? m.format("ddd, MMM D • h:mm A") : "TBA";
     }catch{ return "TBA"; }
   }
-  const isDefaultTeam = (s) => {
-    const v = (s||"").trim().toLowerCase();
+  function isDefaultTeamName(name){
+    const v = (name||"").trim().toLowerCase();
     return v === "" || v === "team a" || v === "team b" || v === "team";
-  };
-  const isMeaningful = (ev) => {
-    // Wajib: kedua nama tim valid (bukan placeholder)
-    if (isDefaultTeam(ev.teamA) || isDefaultTeam(ev.teamB)) return false;
-    // Minimal ada salah satu informasi tambahan
-    const hasAny = (ev.kick && ev.kick.trim() !== "") ||
-                   (ev.description && ev.description.trim() !== "") ||
-                   (ev.venue && ev.venue.trim() !== "") ||
-                   (ev.city && ev.city.trim() !== "") ||
-                   (ev.state && ev.state.trim() !== "");
-    return !!hasAny;
-  };
-  const teamLine = (name, mascot) => {
+  }
+  function isGarbage(ev){
+    // Drop jika nama tim placeholder/empty
+    if (isDefaultTeamName(ev.teamA) || isDefaultTeamName(ev.teamB)) return true;
+    // Drop jika nyaris kosong: tidak ada kick, venue, city, description
+    const hasInfo = (!!ev.kick && ev.kick.trim()!=="") || (!!ev.venue && ev.venue.trim()!=="") ||
+                    (!!ev.city && ev.city.trim()!=="") || (!!ev.description && ev.description.trim()!=="");
+    if (!hasInfo) return true;
+    return false;
+  }
+  function teamLine(name, mascot){
     const nm = (name||"").trim();
     const mc = (mascot||"").trim();
     return mc ? `${nm} (${mc})` : nm;
-  };
-  const locText = (ev) => {
+  }
+  function locText(ev){
     if (ev.venue && ev.venue.trim() !== "") return ev.venue;
     if (ev.city && ev.state) return `${ev.city}, ${ev.state}`;
     if (ev.state) return ev.state;
     return "—";
-  };
+  }
 
   async function load(){
     const tz = tzSel.value;
@@ -143,10 +142,10 @@
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const raw = await res.json();
 
-      // 1) buang entri kosong/placeholder
-      let data = (Array.isArray(raw)? raw:[]).filter(isMeaningful);
+      // Buang entry kosong/placeholder
+      let data = (Array.isArray(raw)? raw:[]).filter(ev => !isGarbage(ev));
 
-      // 2) filter UI
+      // Filter UI
       const q = (qInput.value||'').toLowerCase().trim();
       const st = (stateSel.value||'').toUpperCase();
       const onlyUpcoming = upcomingChk.checked;
@@ -161,13 +160,13 @@
       }
       if (onlyUpcoming) {
         data = data.filter(ev=>{
-          if (!ev.kick) return true; // biarkan TBA lewat (opsional: ganti ke false kalau mau sembunyikan)
+          if (!ev.kick) return false; // TBA disembunyikan saat Upcoming only
           const m = /z$/i.test(ev.kick) ? dayjs.utc(ev.kick).tz(tz) : dayjs.tz(ev.kick, tz);
           return !m.isValid() || m.isAfter(now);
         });
       }
 
-      // group by state + sort time
+      // Group by state + sort
       const byState = {};
       for(const ev of data){
         const s = (ev.state||'').toUpperCase();
