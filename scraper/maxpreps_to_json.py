@@ -1,3 +1,4 @@
+# scraper/maxpreps_to_json.py
 import json, re, time, random, argparse, os, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
@@ -21,19 +22,19 @@ STATE_CODES = [
 BASE = "https://www.maxpreps.com"
 SPORT = "football"
 
-TEAM_CACHE = {}  # cache enrichment tim
+TEAM_CACHE = {}  # cache enrichment dari halaman tim
 
 # ---------------- HTTP ----------------
 def get(url, session, retries=3, backoff=1.7):
     for i in range(retries):
-        r = session.get(url, headers=HEADERS, timeout=30)
+        r = session.get(url, headers=HEADERS, timeout=45)
         if r.ok:
             return r
-        time.sleep((backoff ** i) + random.uniform(0, 0.3))
+        time.sleep((backoff ** i) + random.uniform(0, 0.35))
     r.raise_for_status()
     return r
 
-# ---------------- Helpers ----------------
+# ---------------- Helpers: text & date ----------------
 def ldjson_first(soup):
     for tag in soup.select('script[type="application/ld+json"]'):
         try:
@@ -47,15 +48,6 @@ def ldjson_first(soup):
 def text_one(soup, sel, default=""):
     el = soup.select_one(sel)
     return (el.get_text(strip=True) if el else default) or default
-
-def attr_one(soup, sel, name, default=""):
-    el = soup.select_one(sel)
-    if el and el.has_attr(name):
-        return el.get(name) or default
-    for cand in ["data-src", "data-original", "data-lazy-src"]:
-        if el and el.has_attr(cand):
-            return el.get(cand) or default
-    return default
 
 def clean_team(s):
     if not s: return ""
@@ -99,19 +91,144 @@ def parse_city_state_from_parens(text):
         return m.group(1).strip(), m.group(2).strip()
     return "", ""
 
+# ---------------- Helpers: image find (ketat) ----------------
+def _pick_from_srcset(val):
+    if not val: return ""
+    first = val.split(",", 1)[0].strip()
+    return first.split(" ", 1)[0].strip()
+
+def _extract_bg_url(style_text):
+    if not style_text: return ""
+    m = re.search(r"background-image\s*:\s*url\((['\"]?)(.*?)\1\)", style_text)
+    return m.group(2) if m else ""
+
+def find_img_url(soup, scope_css):
+    """
+    Cari URL gambar DALAM scope_css saja (tidak pakai og:image global).
+    """
+    wrap = soup.select_one(scope_css) if scope_css else soup
+    if not wrap: return ""
+
+    # 1) <img>
+    img = wrap.select_one("img")
+    if img:
+        for attr in ["src", "data-src", "data-original", "data-lazy-src"]:
+            if img.get(attr):
+                return img.get(attr)
+        if img.get("srcset"):
+            return _pick_from_srcset(img.get("srcset"))
+
+    # 2) <picture><source>
+    src = wrap.select_one("picture source[srcset]")
+    if src and src.get("srcset"):
+        return _pick_from_srcset(src.get("srcset"))
+
+    # 3) style background-image (di scope atau anak-anaknya)
+    url = _extract_bg_url(getattr(wrap, "get", lambda *_: None)("style"))
+    if url:
+        return url
+    for el in wrap.select("[style]"):
+        url = _extract_bg_url(el.get("style"))
+        if url:
+            return url
+
+    # ⛔️ JANGAN ambil og:image global di sini
+    return ""
+
+# ---------------- Helpers: logo filtering ----------------
+PLACEHOLDER_PATTERNS = [
+    "asset.maxpreps.io/includes/images/logos/maxpreps-logo-white",
+    "asset.maxpreps.io/assets/images/logos/maxpreps-logo",
+]
+
+def is_placeholder_url(url: str) -> bool:
+    if not url: return True
+    u = url.lower()
+    return any(p in u for p in PLACEHOLDER_PATTERNS)
+
+def prefer_school_asset(url: str) -> bool:
+    if not url: return False
+    u = url.lower()
+    # logo/mascot sekolah yang "benar" biasanya di domain ini:
+    return ("image.maxpreps.io/school-logo" in u) or ("image.maxpreps.io/school-mascot" in u)
+
+# ---------------- Helpers: Playwright ----------------
+def try_playwright_get_images(url, selectors=None, timeout_ms=90000):
+    """
+    Render halaman dengan Chromium headless, lalu kumpulkan URL gambar dari selector:
+    - background-image (computed style)
+    - <img src> dan srcset
+    Return: list[str] unik
+    """
+    if os.getenv("NO_PLAYWRIGHT"):
+        return []  # matikan fallback via env untuk testing cepat
+
+    selectors = selectors or [
+        ".mascot-image",
+        ".team-overview__logo",
+        ".team-details__logo",
+        ".team-logo",
+        ".school-logo",
+        ".avatar",
+        "img[alt*='logo' i]",
+        "img"
+    ]
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox","--disable-setuid-sandbox"]
+            )
+            page = browser.new_page(user_agent=HEADERS["User-Agent"])
+            page.goto(url, timeout=timeout_ms)
+            page.wait_for_load_state("networkidle")
+            urls = set()
+            for sel in selectors:
+                for el in page.query_selector_all(sel):
+                    # background-image
+                    try:
+                        style = el.evaluate("e => getComputedStyle(e).backgroundImage")
+                        if style and "url(" in style:
+                            m = re.search(r"url\\((['\\\"]?)(.*?)\\1\\)", style)
+                            if m and m.group(2):
+                                urls.add(m.group(2))
+                    except Exception:
+                        pass
+                    # img src / srcset
+                    src = el.get_attribute("src")
+                    if src: urls.add(src)
+                    srcset = el.get_attribute("srcset")
+                    if srcset:
+                        first = srcset.split(",", 1)[0].strip().split(" ", 1)[0]
+                        if first: urls.add(first)
+            browser.close()
+            return list(urls)
+    except Exception:
+        return []
+
 # ---------------- Enrichment dari halaman tim ----------------
 def parse_team_page(team_url, session):
     if not team_url:
-        return {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+        return {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     if team_url in TEAM_CACHE:
         return TEAM_CACHE[team_url]
-    out = {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    out = {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     try:
         r = get(team_url, session)
         soup = BeautifulSoup(r.text, "html.parser")
         out["logo"] = (
-            attr_one(soup, 'meta[property="og:image"]', 'content') or
-            attr_one(soup, '.TeamHeader img, .team-header img, .team-logo img, .school-logo img, .avatar img, img[alt*="logo" i]', 'src')
+            find_img_url(soup, '.TeamHeader') or
+            find_img_url(soup, '.team-header') or
+            find_img_url(soup, '.team-logo') or
+            find_img_url(soup, '.school-logo') or
+            find_img_url(soup, '.avatar') or
+            ""
+        )
+        out["mascotImg"] = (
+            find_img_url(soup, '.mascot-image') or
+            find_img_url(soup, '.team-details__logo') or
+            ""
         )
         out["school"] = (
             text_one(soup, '.TeamHeader h1, .team-header h1, h1[itemprop="name"]') or
@@ -124,7 +241,7 @@ def parse_team_page(team_url, session):
         loc = (
             text_one(soup, '.TeamHeader .location, .team-header .location') or
             text_one(soup, '.profile-header .location') or
-            text_one(soup, 'meta[name="description"]')
+            ""
         )
         m_cs = re.search(r"([A-Za-z .'-]+),\s*([A-Z]{2})(?:\b|$)", loc or "")
         if m_cs:
@@ -134,10 +251,42 @@ def parse_team_page(team_url, session):
             m_state_url = re.search(r"/([a-z]{2})/", team_url)
             if m_state_url:
                 out["state"] = m_state_url.group(1).upper()
+
+        # Fallback Playwright pada team page
+        if (not out["logo"]) or (not out["mascotImg"]):
+            imgs = try_playwright_get_images(team_url)
+            if imgs:
+                if not out["mascotImg"]:
+                    out["mascotImg"] = next((u for u in imgs if "image.maxpreps.io/school-mascot" in u), out["mascotImg"])
+                if not out["logo"]:
+                    out["logo"] = next((u for u in imgs if "image.maxpreps.io/school-logo" in u), out["logo"])
+
+        # Bersihkan placeholder & fallback ke mascot kalau logo kosong
+        if is_placeholder_url(out["logo"]): out["logo"] = ""
+        if (not out["logo"]) and prefer_school_asset(out.get("mascotImg","")):
+            out["logo"] = out["mascotImg"]
+
     except Exception:
         pass
     TEAM_CACHE[team_url] = out
     return out
+
+# ---------------- Helpers: guess team URLs kalau anchor standar hilang ----------------
+def _guess_team_url(soup, team_name):
+    if not team_name:
+        return ""
+    # cari link yang mengandung nama tim dan tampak seperti link halaman tim
+    for a in soup.select('a[href]'):
+        href = a.get('href') or ''
+        txt = a.get_text(strip=True) or ''
+        if team_name.lower() in txt.lower() and re.search(r"/football/|/teams?/|/roster|/schedule", href):
+            return urljoin(BASE, href)
+    # fallback: cari link negara bagian + football
+    for a in soup.select('a[href*="/football/"]'):
+        href = a.get('href') or ''
+        if team_name.split()[0].lower() in href.lower():
+            return urljoin(BASE, href)
+    return ""
 
 # ---------------- Halaman game ----------------
 def parse_game_page(url, session, default_year, ref_date_ymd):
@@ -151,37 +300,57 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
             text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name'))
     home, away = clean_team(home), clean_team(away)
 
-    home_href = attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name a', 'href')
-    away_href = attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name a', 'href')
-    home_url = urljoin(BASE, home_href) if home_href else ""
-    away_url = urljoin(BASE, away_href) if away_href else ""
+    home_href = soup.select_one('div.team-overview__team:nth-of-type(1) .team-overview__team-name a')
+    away_href = soup.select_one('div.team-overview__team:nth-of-type(2) .team-overview__team-name a')
+    home_url = urljoin(BASE, home_href.get("href")) if home_href and home_href.get("href") else ""
+    away_url = urljoin(BASE, away_href.get("href")) if away_href and away_href.get("href") else ""
+    if not home_url: home_url = _guess_team_url(soup, home)
+    if not away_url: away_url = _guess_team_url(soup, away)
 
-    # Mascot (jika tersedia di game page)
-    mascotA = text_one(soup, 'div.team-details:nth-of-type(1) a.team-details__mascot') or \
-              text_one(soup, 'div.team-details:nth-of-type(1) .team-details__mascot') or ""
-    mascotB = text_one(soup, 'div.team-details:nth-of-type(2) a.team-details__mascot') or \
-              text_one(soup, 'div.team-details:nth-of-type(2) .team-details__mascot') or ""
+    # Mascot name (game page + fallback beberapa layout)
+    mascotA = (text_one(soup, 'div.team-details:nth-of-type(1) a.team-details__mascot') or
+               text_one(soup, 'div.team-details:nth-of-type(1) .team-details__mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(1) .mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-details [class*="mascot"]'))
+    mascotB = (text_one(soup, 'div.team-details:nth-of-type(2) a.team-details__mascot') or
+               text_one(soup, 'div.team-details:nth-of-type(2) .team-details__mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(2) .mascot') or
+               text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-details [class*="mascot"]'))
+
+    # Mascot image (background-image / logo blok)
+    mascotImgA = (
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .mascot-image') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo') or
+        ""
+    )
+    mascotImgB = (
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .mascot-image') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo') or
+        ""
+    )
+    mascotLetterA = text_one(soup, 'div.team-overview__team:nth-of-type(1) .mascot-image--letter')
+    mascotLetterB = text_one(soup, 'div.team-overview__team:nth-of-type(2) .mascot-image--letter')
 
     # Deskripsi & venue
     desc  = text_one(soup, 'p.contest-description') or text_one(soup, 'div.contest-description')
     venue = text_one(soup, 'p.contest-location') or text_one(soup, 'div.contest-location')
 
-    # Logo langsung di page (fallback luas)
+    # Logo langsung di page (scope ketat)
     logoA = (
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .school-logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .avatar img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) img[alt*="logo" i]', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) img', 'src')
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .school-logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .avatar') or
+        ""
     )
     logoB = (
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .school-logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .avatar img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) img[alt*="logo" i]', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) img', 'src')
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .school-logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .avatar') or
+        ""
     )
 
     # Kickoff dari LD+JSON; fallback parse dari deskripsi
@@ -190,17 +359,45 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
     if isinstance(ld, dict):
         start_iso = (ld.get("startDate") or (ld.get("event") or {}).get("startDate") or "")
     if not start_iso:
+        # "today @ 10a"
+        mm, dd, yyyy = ref_date_ymd.split("-")
         start_iso = parse_desc_today(desc, ref_date_ymd)
     if not start_iso:
         start_iso = parse_desc_monthday(desc, default_year)
 
     # Enrich dari halaman tim
-    enrichA = parse_team_page(home_url, session) if home_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
-    enrichB = parse_team_page(away_url, session) if away_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    enrichA = parse_team_page(home_url, session) if home_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
+    enrichB = parse_team_page(away_url, session) if away_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     logoA = logoA or enrichA.get("logo", "")
     logoB = logoB or enrichB.get("logo", "")
     if not mascotA: mascotA = enrichA.get("mascot", "")
     if not mascotB: mascotB = enrichB.get("mascot", "")
+    if not mascotImgA: mascotImgA = enrichA.get("mascotImg", "")
+    if not mascotImgB: mascotImgB = enrichB.get("mascotImg", "")
+
+    # --- Fallback Playwright kalau masih kosong ---
+    need_pw = (not logoA) or (not logoB) or (not mascotImgA) or (not mascotImgB)
+    if need_pw:
+        pw_imgs = try_playwright_get_images(url)
+        if pw_imgs:
+            # pilih mascot lebih dulu dari domain school-mascot
+            if not mascotImgA:
+                mascotImgA = next((u for u in pw_imgs if "image.maxpreps.io/school-mascot" in u), mascotImgA)
+            if not mascotImgB:
+                mascotImgB = next((u for u in pw_imgs if "image.maxpreps.io/school-mascot" in u and u != mascotImgA), mascotImgB)
+            # pilih logo dari domain school-logo
+            if not logoA:
+                logoA = next((u for u in pw_imgs if "image.maxpreps.io/school-logo" in u), logoA)
+            if not logoB:
+                logoB = next((u for u in pw_imgs if "image.maxpreps.io/school-logo" in u and u != logoA), logoB)
+
+    # Bersihkan placeholder logo situs & fallback ke mascot image
+    if is_placeholder_url(logoA): logoA = ""
+    if is_placeholder_url(logoB): logoB = ""
+    if (not logoA) and prefer_school_asset(mascotImgA):
+        logoA = mascotImgA
+    if (not logoB) and prefer_school_asset(mascotImgB):
+        logoB = mascotImgB
 
     # City/State prioritas dari team page → venue → deskripsi
     city = enrichA.get("city") or enrichB.get("city") or ""
@@ -235,6 +432,10 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
         "logoB": logoB or "",
         "mascotA": mascotA or "",
         "mascotB": mascotB or "",
+        "mascotImgA": mascotImgA or "",
+        "mascotImgB": mascotImgB or "",
+        "mascotLetterA": mascotLetterA or "",
+        "mascotLetterB": mascotLetterB or "",
         "description": desc or ""
     }
 
@@ -253,8 +454,17 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
         links = [urljoin(BASE, a.get("href")) for a in soup.select(".c a") if a.get("href")]
 
     links = sorted(set(links))
+    # batasi via env saat testing
+    cap_env = os.getenv("LIMIT_PER_STATE")
+    if cap_env:
+        try:
+            cap = int(cap_env)
+            links = links[:cap]
+        except Exception:
+            pass
+
     results = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:  # moderat karena Playwright berat
         futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd) for u in links]
         for f in as_completed(futs):
             try:
@@ -266,17 +476,14 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
 # ---------------- Orchestrator + Filtering ----------------
 def is_informative(ev, strict=False):
     """
-    Return False kalau entry 'kosong' dan harus di-skip.
-    Kriteria minimal:
-      - teamA & teamB terisi (bukan 'Team A/B'), DAN
-      - ada salah satu informasi penting: kick/description/city/state/venue/mascot/logo.
-    Kalau strict=True, butuh minimal 2 informasi penting selain tim.
+    Drop entri 'kosong'.
+    Minimal: teamA/B harus terisi (bukan default) + ada ≥1 info penting.
+    strict=True: butuh ≥2 info penting.
     """
     if not ev.get("teamA") or not ev.get("teamB"):
         return False
     if ev["teamA"] == "Team A" or ev["teamB"] == "Team B":
         return False
-
     infos = [
         bool(ev.get("kick")),
         bool(ev.get("description")),
@@ -285,6 +492,8 @@ def is_informative(ev, strict=False):
         bool(ev.get("venue")),
         bool(ev.get("mascotA")),
         bool(ev.get("mascotB")),
+        bool(ev.get("mascotImgA")),
+        bool(ev.get("mascotImgB")),
         bool(ev.get("logoA")),
         bool(ev.get("logoB")),
     ]
@@ -317,9 +526,9 @@ def main():
                     help="Comma-separated state codes (e.g., tx,ca,fl). Default: all")
     ap.add_argument("--outdir", default="data", help="Folder output JSON")
     ap.add_argument("--no-drop-empty", action="store_true",
-                    help="JANGAN filter entry kosong (tulis semua).")
+                    help="JANGAN filter entri kosong (tulis semua).")
     ap.add_argument("--strict", action="store_true",
-                    help="Filter lebih ketat: butuh ≥2 info penting selain team.")
+                    help="Filter lebih ketat: butuh ≥2 info penting.")
     args = ap.parse_args()
 
     states = [s.strip().lower() for s in args.states.split(",") if s.strip()]
