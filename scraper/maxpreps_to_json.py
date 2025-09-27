@@ -21,7 +21,7 @@ STATE_CODES = [
 BASE = "https://www.maxpreps.com"
 SPORT = "football"
 
-TEAM_CACHE = {}  # cache enrichment tim
+TEAM_CACHE = {}  # cache enrichment tim dari halaman tim
 
 # ---------------- HTTP ----------------
 def get(url, session, retries=3, backoff=1.7):
@@ -48,14 +48,56 @@ def text_one(soup, sel, default=""):
     el = soup.select_one(sel)
     return (el.get_text(strip=True) if el else default) or default
 
-def attr_one(soup, sel, name, default=""):
-    el = soup.select_one(sel)
-    if el and el.has_attr(name):
-        return el.get(name) or default
-    for cand in ["data-src", "data-original", "data-lazy-src"]:
-        if el and el.has_attr(cand):
-            return el.get(cand) or default
-    return default
+def _pick_from_srcset(val):
+    if not val: return ""
+    first = val.split(",", 1)[0].strip()
+    return first.split(" ", 1)[0].strip()
+
+def _extract_bg_url(style_text):
+    if not style_text: return ""
+    m = re.search(r"background-image\s*:\s*url\((['\"]?)(.*?)\1\)", style_text)
+    return m.group(2) if m else ""
+
+def find_img_url(soup, scope_css):
+    """
+    Cari URL gambar di dalam elemen 'scope_css':
+    - <img src|data-*|srcset>
+    - <picture><source srcset>
+    - style="background-image:url(...)"
+    - global <meta property="og:image">
+    """
+    wrap = soup.select_one(scope_css) if scope_css else soup
+    if not wrap: return ""
+
+    # 1) <img>
+    img = wrap.select_one("img")
+    if img:
+        for attr in ["src", "data-src", "data-original", "data-lazy-src"]:
+            if img.get(attr):
+                return img.get(attr)
+        if img.get("srcset"):
+            return _pick_from_srcset(img.get("srcset"))
+
+    # 2) <picture><source>
+    src = wrap.select_one("picture source[srcset]")
+    if src and src.get("srcset"):
+        return _pick_from_srcset(src.get("srcset"))
+
+    # 3) style background-image (di scope atau anak-anaknya)
+    url = _extract_bg_url(getattr(wrap, "get", lambda *_: None)("style"))
+    if url:
+        return url
+    for el in wrap.select("[style]"):
+        url = _extract_bg_url(el.get("style"))
+        if url:
+            return url
+
+    # 4) og:image
+    og = soup.select_one('meta[property="og:image"]')
+    if og and og.get("content"):
+        return og.get("content")
+
+    return ""
 
 def clean_team(s):
     if not s: return ""
@@ -102,16 +144,20 @@ def parse_city_state_from_parens(text):
 # ---------------- Enrichment dari halaman tim ----------------
 def parse_team_page(team_url, session):
     if not team_url:
-        return {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+        return {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     if team_url in TEAM_CACHE:
         return TEAM_CACHE[team_url]
-    out = {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    out = {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     try:
         r = get(team_url, session)
         soup = BeautifulSoup(r.text, "html.parser")
         out["logo"] = (
-            attr_one(soup, 'meta[property="og:image"]', 'content') or
-            attr_one(soup, '.TeamHeader img, .team-header img, .team-logo img, .school-logo img, .avatar img, img[alt*="logo" i]', 'src')
+            find_img_url(soup, '.TeamHeader') or
+            find_img_url(soup, '.team-header') or
+            find_img_url(soup, '.team-logo') or
+            find_img_url(soup, '.school-logo') or
+            find_img_url(soup, '.avatar') or
+            find_img_url(soup, 'body')
         )
         out["school"] = (
             text_one(soup, '.TeamHeader h1, .team-header h1, h1[itemprop="name"]') or
@@ -120,6 +166,11 @@ def parse_team_page(team_url, session):
         out["mascot"] = (
             text_one(soup, '.mascot, .team-mascot, a.team-details__mascot') or
             out.get("mascot", "")
+        )
+        out["mascotImg"] = (
+            find_img_url(soup, '.mascot-image') or
+            find_img_url(soup, '.team-details__logo') or
+            ""
         )
         loc = (
             text_one(soup, '.TeamHeader .location, .team-header .location') or
@@ -151,16 +202,30 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
             text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name'))
     home, away = clean_team(home), clean_team(away)
 
-    home_href = attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name a', 'href')
-    away_href = attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name a', 'href')
-    home_url = urljoin(BASE, home_href) if home_href else ""
-    away_url = urljoin(BASE, away_href) if away_href else ""
+    home_href = soup.select_one('div.team-overview__team:nth-of-type(1) .team-overview__team-name a')
+    away_href = soup.select_one('div.team-overview__team:nth-of-type(2) .team-overview__team-name a')
+    home_url = urljoin(BASE, home_href.get("href")) if home_href and home_href.get("href") else ""
+    away_url = urljoin(BASE, away_href.get("href")) if away_href and away_href.get("href") else ""
 
-    # Mascot (jika tersedia di game page)
+    # Mascot name (game page)
     mascotA = text_one(soup, 'div.team-details:nth-of-type(1) a.team-details__mascot') or \
               text_one(soup, 'div.team-details:nth-of-type(1) .team-details__mascot') or ""
     mascotB = text_one(soup, 'div.team-details:nth-of-type(2) a.team-details__mascot') or \
               text_one(soup, 'div.team-details:nth-of-type(2) .team-details__mascot') or ""
+
+    # Mascot image (background-image / logo blok)
+    mascotImgA = (
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .mascot-image') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo') or
+        ""
+    )
+    mascotImgB = (
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .mascot-image') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo') or
+        ""
+    )
+    mascotLetterA = text_one(soup, 'div.team-overview__team:nth-of-type(1) .mascot-image--letter')
+    mascotLetterB = text_one(soup, 'div.team-overview__team:nth-of-type(2) .mascot-image--letter')
 
     # Deskripsi & venue
     desc  = text_one(soup, 'p.contest-description') or text_one(soup, 'div.contest-description')
@@ -168,20 +233,18 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
 
     # Logo langsung di page (fallback luas)
     logoA = (
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .school-logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) .avatar img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) img[alt*="logo" i]', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(1) img', 'src')
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .team-details__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .school-logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1) .avatar') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(1)')
     )
     logoB = (
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .school-logo img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) .avatar img', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) img[alt*="logo" i]', 'src') or
-        attr_one(soup, 'div.team-overview__team:nth-of-type(2) img', 'src')
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .team-details__logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .school-logo') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2) .avatar') or
+        find_img_url(soup, 'div.team-overview__team:nth-of-type(2)')
     )
 
     # Kickoff dari LD+JSON; fallback parse dari deskripsi
@@ -195,12 +258,14 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
         start_iso = parse_desc_monthday(desc, default_year)
 
     # Enrich dari halaman tim
-    enrichA = parse_team_page(home_url, session) if home_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
-    enrichB = parse_team_page(away_url, session) if away_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    enrichA = parse_team_page(home_url, session) if home_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
+    enrichB = parse_team_page(away_url, session) if away_url else {"logo":"", "city":"", "state":"", "school":"", "mascot":"", "mascotImg":""}
     logoA = logoA or enrichA.get("logo", "")
     logoB = logoB or enrichB.get("logo", "")
     if not mascotA: mascotA = enrichA.get("mascot", "")
     if not mascotB: mascotB = enrichB.get("mascot", "")
+    if not mascotImgA: mascotImgA = enrichA.get("mascotImg", "")
+    if not mascotImgB: mascotImgB = enrichB.get("mascotImg", "")
 
     # City/State prioritas dari team page → venue → deskripsi
     city = enrichA.get("city") or enrichB.get("city") or ""
@@ -235,6 +300,10 @@ def parse_game_page(url, session, default_year, ref_date_ymd):
         "logoB": logoB or "",
         "mascotA": mascotA or "",
         "mascotB": mascotB or "",
+        "mascotImgA": mascotImgA or "",
+        "mascotImgB": mascotImgB or "",
+        "mascotLetterA": mascotLetterA or "",
+        "mascotLetterB": mascotLetterB or "",
         "description": desc or ""
     }
 
@@ -254,7 +323,7 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
 
     links = sorted(set(links))
     results = []
-    with ThreadPoolExecutor(max_workers=4) as ex:
+    with ThreadPoolExecutor(max_workers=4) as ex:  # lebih rendah karena enrichment ke team page
         futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd) for u in links]
         for f in as_completed(futs):
             try:
@@ -266,17 +335,14 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
 # ---------------- Orchestrator + Filtering ----------------
 def is_informative(ev, strict=False):
     """
-    Return False kalau entry 'kosong' dan harus di-skip.
-    Kriteria minimal:
-      - teamA & teamB terisi (bukan 'Team A/B'), DAN
-      - ada salah satu informasi penting: kick/description/city/state/venue/mascot/logo.
-    Kalau strict=True, butuh minimal 2 informasi penting selain tim.
+    Drop entri 'kosong'.
+    Minimal: teamA/B harus terisi (bukan default) + ada ≥1 info penting.
+    strict=True: butuh ≥2 info penting.
     """
     if not ev.get("teamA") or not ev.get("teamB"):
         return False
     if ev["teamA"] == "Team A" or ev["teamB"] == "Team B":
         return False
-
     infos = [
         bool(ev.get("kick")),
         bool(ev.get("description")),
@@ -285,6 +351,8 @@ def is_informative(ev, strict=False):
         bool(ev.get("venue")),
         bool(ev.get("mascotA")),
         bool(ev.get("mascotB")),
+        bool(ev.get("mascotImgA")),
+        bool(ev.get("mascotImgB")),
         bool(ev.get("logoA")),
         bool(ev.get("logoB")),
     ]
@@ -317,9 +385,9 @@ def main():
                     help="Comma-separated state codes (e.g., tx,ca,fl). Default: all")
     ap.add_argument("--outdir", default="data", help="Folder output JSON")
     ap.add_argument("--no-drop-empty", action="store_true",
-                    help="JANGAN filter entry kosong (tulis semua).")
+                    help="JANGAN filter entri kosong (tulis semua).")
     ap.add_argument("--strict", action="store_true",
-                    help="Filter lebih ketat: butuh ≥2 info penting selain team.")
+                    help="Filter lebih ketat: butuh ≥2 info penting.")
     args = ap.parse_args()
 
     states = [s.strip().lower() for s in args.states.split(",") if s.strip()]
