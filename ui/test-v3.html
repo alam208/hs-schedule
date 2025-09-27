@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>HS Sports — Schedule (UI v3)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a}
+    header{position:sticky;top:0;background:#fff8;border-bottom:1px solid #e2e8f0;backdrop-filter:saturate(1.2) blur(6px)}
+    .wrap{max-width:1100px;margin:0 auto;padding:16px}
+    .controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
+    .row{display:flex;align-items:center;gap:8px}
+    input,select,button{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
+    button{cursor:pointer}
+    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+    .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:14px}
+    .teams{font-weight:800}
+    .vs{color:#94a3b8;margin:0 6px}
+    .meta{margin-top:8px;color:#475569;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
+    .desc{margin-top:8px;color:#334155;font-size:14px;line-height:1.45}
+    .state-title{font-weight:800;margin:18px 0 8px}
+    footer{color:#94a3b8;text-align:center;padding:28px 12px}
+    @media (max-width:800px){.controls{grid-template-columns:1fr} .grid{grid-template-columns:1fr}}
+  </style>
+  <!-- dayjs + timezone (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/plugin/utc.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/plugin/timezone.js"></script>
+</head>
+<body>
+<header>
+  <div class="wrap row" style="justify-content:space-between">
+    <div class="row" style="gap:10px">
+      <strong>High School Sports — Schedule</strong>
+      <span style="color:#64748b;font-size:12px">UI v3</span>
+    </div>
+    <div class="row">
+      <label>US TZ:
+        <select id="tz">
+          <option value="America/New_York">ET</option>
+          <option value="America/Chicago">CT</option>
+          <option value="America/Denver">MT</option>
+          <option value="America/Los_Angeles">PT</option>
+        </select>
+      </label>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <div class="controls">
+    <div class="row">
+      <button id="prev">Prev</button>
+      <div id="dateLabel" style="padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;background:#fff"></div>
+      <button id="next">Next</button>
+    </div>
+    <input id="q" placeholder="Search your team, city, school…" />
+    <div class="row" style="justify-content:flex-end">
+      <select id="state">
+        <option value="">All states</option>
+      </select>
+      <label class="row" style="gap:6px"><input type="checkbox" id="upcoming" checked /> Upcoming only</label>
+    </div>
+  </div>
+
+  <div id="status" style="margin:10px 0;color:#64748b;font-size:14px"></div>
+  <div id="root"></div>
+</main>
+
+<footer>
+  Data JSON from GitHub Pages • <a href="#" id="jsonLink"></a>
+</footer>
+
+<script>
+  dayjs.extend(dayjs_plugin_utc); dayjs.extend(dayjs_plugin_timezone);
+
+  const GH_USER = "alam208";
+  const REPO = "hs-schedule";
+  const PAGES_BASE = `https://${GH_USER}.github.io/${REPO}`;
+
+  const tzSel = document.getElementById('tz');
+  const dateLabel = document.getElementById('dateLabel');
+  const prevBtn = document.getElementById('prev');
+  const nextBtn = document.getElementById('next');
+  const qInput = document.getElementById('q');
+  const stateSel = document.getElementById('state');
+  const upcomingChk = document.getElementById('upcoming');
+  const root = document.getElementById('root');
+  const statusEl = document.getElementById('status');
+  const jsonLink = document.getElementById('jsonLink');
+
+  let current = dayjs(); // today
+  const US_STATES = ["AL","AK","AR","AZ","CA","CO","CT","DC","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD","ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","PS","RI","SC","SD","TN","TX","UT","VA","VT","WA","WI","WV","WY"];
+  stateSel.innerHTML += US_STATES.map(s=>`<option>${s}</option>`).join('');
+
+  function jsonUrl(d){
+    const yyyy=d.year(), mm=String(d.month()+1).padStart(2,'0'), dd=String(d.date()).padStart(2,'0');
+    return `${PAGES_BASE}/data/hsfb-${yyyy}-${mm}-${dd}.json`;
+  }
+  function fmtKick(iso, tz){
+    if(!iso) return "TBA";
+    try{
+     
