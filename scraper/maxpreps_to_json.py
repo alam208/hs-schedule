@@ -1,6 +1,7 @@
 import json, re, time, random, argparse, os, sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin
+from datetime import datetime
 import requests
 from bs4 import BeautifulSoup
 
@@ -20,7 +21,9 @@ STATE_CODES = [
 BASE = "https://www.maxpreps.com"
 SPORT = "football"
 
-# ------------- HTTP utils -------------
+TEAM_CACHE = {}  # cache enrichment tim
+
+# ---------------- HTTP ----------------
 def get(url, session, retries=3, backoff=1.7):
     for i in range(retries):
         r = session.get(url, headers=HEADERS, timeout=30)
@@ -30,7 +33,7 @@ def get(url, session, retries=3, backoff=1.7):
     r.raise_for_status()
     return r
 
-# ------------- Parsing helpers -------------
+# ---------------- Helpers ----------------
 def ldjson_first(soup):
     for tag in soup.select('script[type="application/ld+json"]'):
         try:
@@ -41,111 +44,165 @@ def ldjson_first(soup):
             pass
     return {}
 
-def parse_dt_from_text(text, year):
-    """
-    Heuristik dari deskripsi: "Friday, September 26 @ 7:00 PM", "Sep 26 @ 7p", dll.
-    Return ISO tanpa zona: YYYY-MM-DDTHH:MM:SS (biar UI tampilkan pakai local time visitor).
-    """
-    if not text:
-        return ""
-    m = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})", text, re.I)
-    t = re.search(r"@?\s*(\d{1,2})(?::(\d{2}))?\s*(a|p)\.?m?\.?", text, re.I)
-    if not m:
-        return ""
-    mon = m.group(1).lower()[:3]
-    month_num = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"].index(mon) + 1
-    day = int(m.group(2))
-    hour, minute = 19, 0
-    if t:
-        hour = int(t.group(1))
-        minute = int(t.group(2) or 0)
-        ampm = t.group(3).lower()
-        if ampm == "p" and hour != 12: hour += 12
-        if ampm == "a" and hour == 12: hour = 0
-    return f"{year:04d}-{month_num:02d}-{day:02d}T{hour:02d}:{minute:02d}:00"
-
-def clean_team(s):
-    if not s: return ""
-    s = re.sub(r"\s*\(\d+\-\d+\)$", "", s).strip()
-    return s
-
 def text_one(soup, sel, default=""):
     el = soup.select_one(sel)
     return (el.get_text(strip=True) if el else default) or default
 
 def attr_one(soup, sel, name, default=""):
     el = soup.select_one(sel)
-    return (el.get(name) if el and el.has_attr(name) else default) or default
+    if el and el.has_attr(name):
+        return el.get(name) or default
+    for cand in ["data-src", "data-original", "data-lazy-src"]:
+        if el and el.has_attr(cand):
+            return el.get(cand) or default
+    return default
 
-# ------------- Parse a single game page -------------
-def parse_game_page(url, session, default_year):
+def clean_team(s):
+    if not s: return ""
+    return re.sub(r"\s*\(\d+\-\d+\)$", "", s).strip()
+
+def parse_ampm(h, m, ampm):
+    h = int(h); m = int(m or 0)
+    ampm = (ampm or "").lower()
+    if ampm.startswith("p") and h != 12: h += 12
+    if ampm.startswith("a") and h == 12: h = 0
+    return f"{h:02d}:{m:02d}:00"
+
+def parse_desc_today(desc, ref_date_ymd):
+    """
+    Tangkap pola: 'today @ 10a' / 'today @ 10 am' / 'today @ 7:30 pm'
+    ref_date_ymd: 'YYYY-MM-DD' (acuan US ET dari --date)
+    """
+    if not desc: return ""
+    m = re.search(r"\btoday\b\s*@\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m?\.?", desc, re.I)
+    if not m:  # 'today @ 10a' atau 'today @ 10 am'
+        m = re.search(r"\btoday\b\s*@\s*(\d{1,2})(?::(\d{2}))?\s*(a|p)\s*\.?m?\.?", desc, re.I)
+    if m:
+        hhmmss = parse_ampm(m.group(1), m.group(2), m.group(3))
+        return f"{ref_date_ymd}T{hhmmss}"
+    return ""
+
+def parse_desc_monthday(desc, year):
+    """
+    Tangkap pola: 'Sep 26 @ 7p', 'September 26 @ 7:30 PM', dsb → 'YYYY-MM-DDTHH:MM:SS'
+    """
+    if not desc: return ""
+    m = re.search(r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+(\d{1,2})", desc, re.I)
+    t = re.search(r"@\s*(\d{1,2})(?::(\d{2}))?\s*([ap])\.?m?\.?", desc, re.I) or \
+        re.search(r"@\s*(\d{1,2})(?::(\d{2}))?\s*(AM|PM|A\.M\.|P\.M\.)", desc, re.I)
+    if not m: return ""
+    mon = m.group(1).lower()[:3]
+    month_num = ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"].index(mon) + 1
+    day = int(m.group(2))
+    if t:
+        am = t.group(3)
+        hhmmss = parse_ampm(t.group(1), t.group(2), am)
+    else:
+        hhmmss = "19:00:00"
+    return f"{int(year):04d}-{month_num:02d}-{day:02d}T{hhmmss}"
+
+# ---------------- Enrichment dari halaman tim ----------------
+def parse_team_page(team_url, session):
+    if not team_url:
+        return {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    if team_url in TEAM_CACHE:
+        return TEAM_CACHE[team_url]
+    out = {"logo":"", "city":"", "state":"", "school":"", "mascot":""}
+    try:
+        r = get(team_url, session)
+        soup = BeautifulSoup(r.text, "html.parser")
+        out["logo"] = (
+            attr_one(soup, 'meta[property="og:image"]', 'content') or
+            attr_one(soup, '.TeamHeader img, .team-header img, .team-logo img', 'src')
+        )
+        # Nama sekolah/mascot kadang tampil gabung; tetap simpan best-effort
+        out["school"] = (
+            text_one(soup, '.TeamHeader h1, .team-header h1, h1[itemprop="name"]') or
+            text_one(soup, 'nav.breadcrumbs a:last-child, .breadcrumbs a:last-child')
+        )
+        # Lokasi
+        loc = (
+            text_one(soup, '.TeamHeader .location, .team-header .location') or
+            text_one(soup, '.profile-header .location') or
+            text_one(soup, 'meta[name="description"]')
+        )
+        m_cs = re.search(r"([A-Za-z .'-]+),\s*([A-Z]{2})(?:\b|$)", loc or "")
+        if m_cs:
+            out["city"] = m_cs.group(1).strip()
+            out["state"] = m_cs.group(2).strip()
+        else:
+            m_state_url = re.search(r"/([a-z]{2})/", team_url)
+            if m_state_url:
+                out["state"] = m_state_url.group(1).upper()
+    except Exception:
+        pass
+    TEAM_CACHE[team_url] = out
+    return out
+
+# ---------------- Halaman game ----------------
+def parse_game_page(url, session, default_year, ref_date_ymd):
     r = get(url, session)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Tim & logo (berbagai kemungkinan selector)
+    # Tim + link tim
     home = (text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name a') or
             text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name'))
     away = (text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name a') or
             text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name'))
     home, away = clean_team(home), clean_team(away)
 
+    home_href = attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name a', 'href')
+    away_href = attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name a', 'href')
+    home_url = urljoin(BASE, home_href) if home_href else ""
+    away_url = urljoin(BASE, away_href) if away_href else ""
+
+    # Mascot (seperti script kamu)
+    mascotA = text_one(soup, 'div.team-details:nth-of-type(1) a.team-details__mascot') or \
+              text_one(soup, 'div.team-details:nth-of-type(1) .team-details__mascot') or ""
+    mascotB = text_one(soup, 'div.team-details:nth-of-type(2) a.team-details__mascot') or \
+              text_one(soup, 'div.team-details:nth-of-type(2) .team-details__mascot') or ""
+
+    # Deskripsi & venue
+    desc  = text_one(soup, 'p.contest-description') or text_one(soup, 'div.contest-description')
+    venue = text_one(soup, 'p.contest-location') or text_one(soup, 'div.contest-location')
+
+    # Logo langsung di page (kadang ada)
     logoA = (attr_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__logo img', 'src') or
              attr_one(soup, 'div.team-overview__team:nth-of-type(1) img', 'src'))
     logoB = (attr_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__logo img', 'src') or
              attr_one(soup, 'div.team-overview__team:nth-of-type(2) img', 'src'))
 
-    # Deskripsi & venue
-    desc  = (text_one(soup, 'p.contest-description') or
-             text_one(soup, 'div.contest-description'))
-    venue = (text_one(soup, 'p.contest-location') or
-             text_one(soup, 'div.contest-location'))
-
-    # Breadcrumbs (kadang memuat nama sekolah/area)
-    breadcrumbs_text = " ".join([el.get_text(" ", strip=True)
-                                 for el in soup.select('nav.breadcrumbs a, ol.breadcrumb li, .breadcrumbs a')])
-
-    # LD+JSON: startDate, logo organisasi kadang tersedia
+    # Kickoff dari LD+JSON (paling akurat)
     ld = ldjson_first(soup)
     start_iso = ""
     if isinstance(ld, dict):
-        start_iso = (ld.get("startDate") or
-                     (ld.get("event") or {}).get("startDate") or "")
-        # Coba isi logo dari performer/organizer bila ada
-        try:
-            perf = ld.get("performer") or ld.get("organizer") or []
-            if isinstance(perf, dict):
-                perf = [perf]
-            for ent in perf:
-                if isinstance(ent, dict) and ent.get("logo"):
-                    logo_val = ent.get("logo")
-                    url_logo = (logo_val.get("url") if isinstance(logo_val, dict) else logo_val)
-                    if not logoA:
-                        logoA = url_logo
-                    elif not logoB and url_logo != logoA:
-                        logoB = url_logo
-        except Exception:
-            pass
+        start_iso = (ld.get("startDate") or (ld.get("event") or {}).get("startDate") or "")
 
-    # Jika waktu tidak ditemukan, coba heuristik dari deskripsi
+    # Jika kosong, tangkap pola "today @ 10a" (acuannya ref_date_ymd dari --date, US ET)
     if not start_iso:
-        start_iso = parse_dt_from_text(desc, default_year)
+        start_iso = parse_desc_today(desc, ref_date_ymd)
+    # Jika masih kosong, coba pola "Sep 26 @ 7p"
+    if not start_iso:
+        start_iso = parse_desc_monthday(desc, default_year)
 
-    # City/State heuristik dari venue "City, ST"
-    city, state = "", ""
+    # Enrich dari halaman tim untuk logo/lokasi (best-effort)
+    enrichA = parse_team_page(home_url, session) if home_url else {"logo":"", "city":"", "state":"", "school":""}
+    enrichB = parse_team_page(away_url, session) if away_url else {"logo":"", "city":"", "state":"", "school":""}
+    logoA = logoA or enrichA.get("logo", "")
+    logoB = logoB or enrichB.get("logo", "")
+
+    # City/State prioritas dari team page, fallback venue
+    city = enrichA.get("city") or enrichB.get("city") or ""
+    state = enrichA.get("state") or enrichB.get("state") or ""
     if venue:
-        m_state = re.search(r",\s*([A-Z]{2})(?:\s|$)", venue)
-        if m_state: state = m_state.group(1)
-        m_city = re.search(r"([^,]+),\s*[A-Z]{2}\b", venue)
-        if m_city: city = m_city.group(1).strip()
+        if not state:
+            m_state = re.search(r",\s*([A-Z]{2})(?:\s|$)", venue)
+            if m_state: state = m_state.group(1)
+        if not city:
+            m_city = re.search(r"([^,]+),\s*[A-Z]{2}\b", venue)
+            if m_city: city = m_city.group(1).strip()
 
-    # Sekolah: coba deteksi frasa umum di breadcrumbs
-    school = ""
-    if breadcrumbs_text:
-        # Ambil potongan yang mengandung kata School/HS/Academy/Prep paling panjang
-        tokens = re.findall(r"[^>]+", breadcrumbs_text)
-        candidates = [t for t in tokens if re.search(r"(High School| HS |Academy|Prep|School)", t, re.I)]
-        if candidates:
-            school = max(candidates, key=len).strip()
+    school = enrichA.get("school") or enrichB.get("school") or ""
 
     return {
         "teamA": home or "Team A",
@@ -153,7 +210,7 @@ def parse_game_page(url, session, default_year):
         "sport": "Football",
         "league": "",
         "venue": venue,
-        "kick": start_iso,          # bisa ISO + Z dari ldjson, atau lokal tanpa zona (heuristik)
+        "kick": start_iso,         # bisa '...Z' dari ldjson; kalau hasil parse_* => tanpa zona
         "stream": "#",
         "chat": "#",
         "school": school,
@@ -161,17 +218,20 @@ def parse_game_page(url, session, default_year):
         "state": state,
         "logoA": logoA or "",
         "logoB": logoB or "",
+        "mascotA": mascotA or "",
+        "mascotB": mascotB or "",
         "description": desc or ""
     }
 
-# ------------- Parse a state scores page (list of games) -------------
-def parse_state_scores(state_code, date_str, session, default_year):
+# ---------------- Halaman state (scores list) ----------------
+def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd):
     url = f"{BASE}/{state_code}/{SPORT}/scores/?date={date_str}"
     r = get(url, session)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Kumpulkan link detail game
+    # Link game detail
     links = []
+    # Selector baru (stabil): apa pun yang mengandung "/game/"
     for a in soup.select('a[href*="/game/"]'):
         href = a.get("href")
         if href and "/game/" in href:
@@ -182,30 +242,31 @@ def parse_state_scores(state_code, date_str, session, default_year):
 
     links = sorted(set(links))
     results = []
-
-    # Concurrency terbatas untuk sopan santun
-    with ThreadPoolExecutor(max_workers=6) as ex:
-        futs = [ex.submit(parse_game_page, u, session, default_year) for u in links]
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd) for u in links]
         for f in as_completed(futs):
             try:
                 results.append(f.result())
             except Exception:
-                # Abaikan error individual agar scraping tetap lanjut
                 pass
     return results
 
-# ------------- Orchestrator -------------
+# ---------------- Orchestrator ----------------
 def scrape_all(date_str="9/26/2025", states=None):
     states = states or STATE_CODES
-    default_year = int(date_str.split("/")[-1])
+    # ref_date_ymd: acuan 'today' (US ET) berdasarkan --date
+    mm, dd, yyyy = date_str.split("/")
+    ref_date_ymd = f"{int(yyyy):04d}-{int(mm):02d}-{int(dd):02d}"
+    default_year = int(yyyy)
+
     out = []
     with requests.Session() as session:
         for st in states:
             try:
-                out.extend(parse_state_scores(st, date_str, session, default_year))
+                out.extend(parse_state_scores(st, date_str, session, default_year, ref_date_ymd))
             except Exception:
                 pass
-            time.sleep(0.6 + random.uniform(0, 0.5))  # jeda sopan antar state
+            time.sleep(0.6 + random.uniform(0, 0.6))
     return out
 
 def main():
@@ -219,7 +280,6 @@ def main():
     states = [s.strip().lower() for s in args.states.split(",") if s.strip()]
     data = scrape_all(args.date, states=states)
 
-    # Nama file: hsfb-YYYY-MM-DD.json
     mm, dd, yyyy = args.date.split("/")
     out_name = f"hsfb-{int(yyyy):04d}-{int(mm):02d}-{int(dd):02d}.json"
     os.makedirs(args.outdir, exist_ok=True)
