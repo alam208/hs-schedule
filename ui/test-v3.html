@@ -1,107 +1,116 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>TEST V3</title>
-<h1 style="font-family:system-ui">TEST V3 — no badges, pure text</h1>
-<p>Jika kamu melihat halaman ini, berarti folder <code>ui/</code> sudah ter-deploy.</p>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>HS Sports — Schedule (UI v3)</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a}
-    header{position:sticky;top:0;background:#fff8;border-bottom:1px solid #e2e8f0;backdrop-filter:saturate(1.2) blur(6px)}
-    .wrap{max-width:1100px;margin:0 auto;padding:16px}
-    .controls{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px}
-    .row{display:flex;align-items:center;gap:8px}
-    input,select,button{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px;background:#fff}
-    button{cursor:pointer}
-    .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
-    .card{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:14px}
-    .teams{font-weight:800}
-    .vs{color:#94a3b8;margin:0 6px}
-    .meta{margin-top:8px;color:#475569;font-size:14px;display:flex;gap:16px;flex-wrap:wrap}
-    .desc{margin-top:8px;color:#334155;font-size:14px;line-height:1.45}
-    .state-title{font-weight:800;margin:18px 0 8px}
-    footer{color:#94a3b8;text-align:center;padding:28px 12px}
-    @media (max-width:800px){.controls{grid-template-columns:1fr} .grid{grid-template-columns:1fr}}
-  </style>
-  <!-- dayjs + timezone (CDN) -->
-  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/plugin/utc.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/dayjs@1/plugin/timezone.js"></script>
-</head>
-<body>
-<header>
-  <div class="wrap row" style="justify-content:space-between">
-    <div class="row" style="gap:10px">
-      <strong>High School Sports — Schedule</strong>
-      <span style="color:#64748b;font-size:12px">UI v3</span>
-    </div>
-    <div class="row">
-      <label>US TZ:
-        <select id="tz">
-          <option value="America/New_York">ET</option>
-          <option value="America/Chicago">CT</option>
-          <option value="America/Denver">MT</option>
-          <option value="America/Los_Angeles">PT</option>
-        </select>
-      </label>
-    </div>
-  </div>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TEST V3 — JSON Loader</title>
+<style>
+  body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:0;background:#f8fafc;color:#0f172a}
+  .wrap{max-width:900px;margin:0 auto;padding:16px}
+  header{border-bottom:1px solid #e2e8f0;background:#fff}
+  input,button{padding:8px 10px;border:1px solid #cbd5e1;border-radius:8px}
+  button{cursor:pointer}
+  .row{display:flex;gap:8px;align-items:center}
+  ul{padding-left:18px}
+  li{margin:6px 0}
+  .muted{color:#64748b}
+</style>
+
+<header class="wrap">
+  <h1>TEST V3 — JSON Loader (no badges)</h1>
 </header>
 
 <main class="wrap">
-  <div class="controls">
-    <div class="row">
-      <button id="prev">Prev</button>
-      <div id="dateLabel" style="padding:8px 12px;border:1px solid #cbd5e1;border-radius:8px;background:#fff"></div>
-      <button id="next">Next</button>
-    </div>
-    <input id="q" placeholder="Search your team, city, school…" />
-    <div class="row" style="justify-content:flex-end">
-      <select id="state">
-        <option value="">All states</option>
-      </select>
-      <label class="row" style="gap:6px"><input type="checkbox" id="upcoming" checked /> Upcoming only</label>
-    </div>
+  <div class="row" style="margin:10px 0">
+    <label>Tanggal (YYYY-MM-DD):
+      <input id="date" type="date" />
+    </label>
+    <button id="loadBtn">Load JSON</button>
   </div>
 
-  <div id="status" style="margin:10px 0;color:#64748b;font-size:14px"></div>
-  <div id="root"></div>
+  <div id="status" class="muted"></div>
+  <div id="meta" class="muted" style="margin-top:6px"></div>
+  <h3 id="count"></h3>
+  <ul id="list"></ul>
+
+  <p class="muted">Sumber: <a id="jsonLink" href="#" target="_blank" rel="noopener"></a></p>
 </main>
 
-<footer>
-  Data JSON from GitHub Pages • <a href="#" id="jsonLink"></a>
-</footer>
-
 <script>
-  dayjs.extend(dayjs_plugin_utc); dayjs.extend(dayjs_plugin_timezone);
-
   const GH_USER = "alam208";
   const REPO = "hs-schedule";
   const PAGES_BASE = `https://${GH_USER}.github.io/${REPO}`;
 
-  const tzSel = document.getElementById('tz');
-  const dateLabel = document.getElementById('dateLabel');
-  const prevBtn = document.getElementById('prev');
-  const nextBtn = document.getElementById('next');
-  const qInput = document.getElementById('q');
-  const stateSel = document.getElementById('state');
-  const upcomingChk = document.getElementById('upcoming');
-  const root = document.getElementById('root');
+  const dateInput = document.getElementById('date');
+  const btn = document.getElementById('loadBtn');
   const statusEl = document.getElementById('status');
+  const metaEl = document.getElementById('meta');
+  const countEl = document.getElementById('count');
+  const listEl = document.getElementById('list');
   const jsonLink = document.getElementById('jsonLink');
 
-  let current = dayjs(); // today
-  const US_STATES = ["AL","AK","AR","AZ","CA","CO","CT","DC","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD","ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","PS","RI","SC","SD","TN","TX","UT","VA","VT","WA","WI","WV","WY"];
-  stateSel.innerHTML += US_STATES.map(s=>`<option>${s}</option>`).join('');
+  // default: hari ini
+  const today = new Date();
+  const pad = n => String(n).padStart(2,'0');
+  dateInput.value = `${today.getFullYear()}-${pad(today.getMonth()+1)}-${pad(today.getDate())}`;
 
-  function jsonUrl(d){
-    const yyyy=d.year(), mm=String(d.month()+1).padStart(2,'0'), dd=String(d.date()).padStart(2,'0');
-    return `${PAGES_BASE}/data/hsfb-${yyyy}-${mm}-${dd}.json`;
+  function urlFor(dStr){
+    // dStr: 'YYYY-MM-DD'
+    return `${PAGES_BASE}/data/hsfb-${dStr}.json`;
   }
-  function fmtKick(iso, tz){
-    if(!iso) return "TBA";
+
+  function isPlaceholder(name){
+    const v = (name||"").trim().toLowerCase();
+    return v === "" || v === "team a" || v === "team b" || v === "team";
+  }
+
+  async function load(){
+    const d = dateInput.value;
+    if(!d){ alert("Pilih tanggal dulu"); return; }
+    const url = urlFor(d);
+    jsonLink.textContent = url; jsonLink.href = url;
+
+    statusEl.textContent = "Loading…";
+    metaEl.textContent = "";
+    countEl.textContent = "";
+    listEl.innerHTML = "";
+
     try{
-     
+      const res = await fetch(url, {cache: 'no-store'});
+      if(!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      // filter: buang entri placeholder / kosong
+      const clean = (Array.isArray(data)? data:[]).filter(ev=>{
+        if (isPlaceholder(ev.teamA) || isPlaceholder(ev.teamB)) return false;
+        const useful = (ev.kick && ev.kick.trim()!=="") ||
+                       (ev.venue && ev.venue.trim()!=="") ||
+                       (ev.city && ev.city.trim()!=="") ||
+                       (ev.state && ev.state.trim()!=="") ||
+                       (ev.description && ev.description.trim()!=="");
+        return !!useful;
+      });
+
+      statusEl.textContent = "";
+      metaEl.textContent = `Menampilkan entri non-kosong.`;
+      countEl.textContent = `Total games: ${clean.length}`;
+
+      listEl.innerHTML = clean.slice(0,50).map(ev=>{
+        const teamA = ev.mascotA ? `${ev.teamA} (${ev.mascotA})` : ev.teamA;
+        const teamB = ev.mascotB ? `${ev.teamB} (${ev.mascotB})` : ev.teamB;
+        const loc = ev.venue?.trim() || [ev.city, ev.state].filter(Boolean).join(', ') || ev.state || '—';
+        const when = ev.kick?.trim() || 'TBA';
+        return `<li><strong>${teamA}</strong> vs <strong>${teamB}</strong> • 🕒 ${when} • 📍 ${loc}</li>`;
+      }).join('');
+
+      if (clean.length === 0){
+        listEl.innerHTML = `<li class="muted">Tidak ada entri valid untuk tanggal ini. Cek apakah JSON ada dan berisi.</li>`;
+      }
+    }catch(err){
+      statusEl.textContent = "Gagal load JSON. Pastikan file untuk tanggal itu ada.";
+      console.error(err);
+    }
+  }
+
+  btn.onclick = load;
+</script>
+</html>
