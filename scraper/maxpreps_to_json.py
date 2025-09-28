@@ -11,10 +11,10 @@ HEADERS = {
 }
 
 STATE_CODES = [
- "al","ak","ar","az","ca","co","ct","dc","de","fl","ga","hi","ia","id","il","in",
- "ks","ky","la","ma","md","me","mi","mn","mo","ms","mt","nc","nd","ne","nh","nj",
- "nm","nv","ny","oh","ok","or","pa","ps","ri","sc","sd","tn","tx","ut","va","vt",
- "wa","wi","wv","wy"
+    "al","ak","ar","az","ca","co","ct","dc","de","fl","ga","hi","ia","id","il","in",
+    "ks","ky","la","ma","md","me","mi","mn","mo","ms","mt","nc","nd","ne","nh","nj",
+    "nm","nv","ny","oh","ok","or","pa","ps","ri","sc","sd","tn","tx","ut","va","vt",
+    "wa","wi","wv","wy"
 ]
 
 BASE = "https://www.maxpreps.com"
@@ -86,15 +86,15 @@ def parse_city_state_from_text(text):
     if m: return m.group(1).strip(), m.group(2).strip()
     return "", ""
 
+# ---- Filtering/pruning JSON ----
 def _is_placeholder_team(name: str) -> bool:
     v = (name or "").strip().lower()
     return v in ("", "team a", "team b", "team")
 
 def _is_meaningful(ev: dict) -> bool:
-    # nama tim valid
     if _is_placeholder_team(ev.get("teamA")) or _is_placeholder_team(ev.get("teamB")):
         return False
-    # ada info tambahan
+    # ada minimal salah satu info berguna
     for k in ("kick", "venue", "city", "state", "description"):
         val = ev.get(k)
         if isinstance(val, str) and val.strip():
@@ -102,7 +102,6 @@ def _is_meaningful(ev: dict) -> bool:
     return False
 
 def _prune_empty_fields(ev: dict) -> dict:
-    """Hapus key bernilai kosong: '', None, '#'(untuk link placeholder)."""
     keep = {}
     for k, v in ev.items():
         if v is None:
@@ -121,14 +120,14 @@ def parse_game_page(url, session, default_year, ref_date_ymd, state_hint=""):
     r = get(url, session)
     soup = BeautifulSoup(r.text, "html.parser")
 
-    # Tim + link tim (tanpa buka halaman tim)
+    # Tim
     home = (text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name a') or
             text_one(soup, 'div.team-overview__team:nth-of-type(1) .team-overview__team-name'))
     away = (text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name a') or
             text_one(soup, 'div.team-overview__team:nth-of-type(2) .team-overview__team-name'))
     home, away = clean_team(home), clean_team(away)
 
-    # Deskripsi, venue, mascot (teks)
+    # Deskripsi/venue/mascot (teks saja)
     desc  = text_one(soup, 'p.contest-description') or text_one(soup, 'div.contest-description')
     venue = text_one(soup, 'p.contest-location') or text_one(soup, 'div.contest-location')
     mascotA = text_one(soup, 'div.team-details:nth-of-type(1) a.team-details__mascot') or \
@@ -146,7 +145,7 @@ def parse_game_page(url, session, default_year, ref_date_ymd, state_hint=""):
     if not start_iso:
         start_iso = parse_desc_monthday(desc, default_year)
 
-    # City/State
+    # City/State heuristik
     city, state = "", (state_hint or "").upper()
     if venue:
         if not state:
@@ -169,7 +168,7 @@ def parse_game_page(url, session, default_year, ref_date_ymd, state_hint=""):
         "kick": start_iso,
         "stream": "#",
         "chat": "#",
-        "school": "",          # tak enrich, biarkan kosong
+        "school": "",          # tidak enrich
         "city": city,
         "state": state,
         "mascotA": mascotA or "",
@@ -183,6 +182,7 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
     r = get(url, session)
     soup = BeautifulSoup(r.text, "html.parser")
 
+    # Kumpulkan link game
     links = []
     for a in soup.select('a[href*="/game/"]'):
         href = a.get("href")
@@ -192,28 +192,28 @@ def parse_state_scores(state_code, date_str, session, default_year, ref_date_ymd
         links = [urljoin(BASE, a.get("href")) for a in soup.select(".c a") if a.get("href")]
 
     links = sorted(set(links))
-    cap_env = os.getenv("LIMIT_PER_STATE")
-    if cap_env:
-        try:
-            cap = int(cap_env)
-            links = links[:cap]
-        except Exception:
-            pass
+    # Catatan: tidak pakai LIMIT_PER_STATE (full). Kalau mau testing cepat:
+    # cap_env = os.getenv("LIMIT_PER_STATE")
+    # if cap_env:
+    #     try:
+        #         links = links[:int(cap_env)]
+    #     except Exception:
+    #         pass
 
     results = []
-with ThreadPoolExecutor(max_workers=6) as ex:
-    futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd, state_code.upper()) for u in links]
-    for f in as_completed(futs):
-        try:
-            ev = f.result()
-            if not _is_meaningful(ev):
-                continue            # <-- buang entri “kosong”
-            ev = _prune_empty_fields(ev)  # <-- hapus field kosong
-            results.append(ev)
-        except Exception:
-            pass
-return results
-
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        futs = [ex.submit(parse_game_page, u, session, default_year, ref_date_ymd, state_code.upper()) for u in links]
+        for f in as_completed(futs):
+            try:
+                ev = f.result()
+                # Buang entri kosong & rapikan field
+                if not _is_meaningful(ev):
+                    continue
+                ev = _prune_empty_fields(ev)
+                results.append(ev)
+            except Exception:
+                pass
+    return results
 
 # ---------------- Orchestrator ----------------
 def scrape_all(date_str="9/26/2025", states=None):
