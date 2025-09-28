@@ -89,7 +89,7 @@
   const statusEl = document.getElementById('status');
   const jsonLink = document.getElementById('jsonLink');
 
-  let current = dayjs(); // today
+  let current = dayjs();
   const US_STATES = ["AL","AK","AR","AZ","CA","CO","CT","DC","DE","FL","GA","HI","IA","ID","IL","IN","KS","KY","LA","MA","MD","ME","MI","MN","MO","MS","MT","NC","ND","NE","NH","NJ","NM","NV","NY","OH","OK","OR","PA","PS","RI","SC","SD","TN","TX","UT","VA","VT","WA","WI","WV","WY"];
   stateSel.innerHTML += US_STATES.map(s=>`<option>${s}</option>`).join('');
 
@@ -100,4 +100,122 @@
   function fmtKick(iso, tz){
     if(!iso) return "TBA";
     try{
-     
+      const m = /z$/i.test(iso) ? dayjs.utc(iso).tz(tz) : dayjs.tz(iso, tz);
+      return m.isValid()? m.format("ddd, MMM D • h:mm A") : "TBA";
+    }catch{ return "TBA"; }
+  }
+  function isPlaceholder(name){
+    const v = (name||"").trim().toLowerCase();
+    return v === "" || v === "team a" || v === "team b" || v === "team";
+  }
+  function isGarbage(ev){
+    if (isPlaceholder(ev.teamA) || isPlaceholder(ev.teamB)) return true;
+    const useful = (ev.kick && ev.kick.trim()!=="") ||
+                   (ev.venue && ev.venue.trim()!=="") ||
+                   (ev.city && ev.city.trim()!=="") ||
+                   (ev.state && ev.state.trim()!=="") ||
+                   (ev.description && ev.description.trim()!=="");
+    return !useful;
+  }
+  function teamLine(name, mascot){
+    const nm = (name||"").trim();
+    const mc = (mascot||"").trim();
+    return mc ? `${nm} (${mc})` : nm;
+  }
+  function locText(ev){
+    if (ev.venue && ev.venue.trim() !== "") return ev.venue;
+    if (ev.city && ev.state) return `${ev.city}, ${ev.state}`;
+    if (ev.state) return ev.state;
+    return "—";
+  }
+
+  async function load(){
+    const tz = tzSel.value;
+    dateLabel.textContent = current.format("ddd, MMM D, YYYY");
+    const url = jsonUrl(current);
+    jsonLink.textContent = url; jsonLink.href = url;
+
+    statusEl.textContent = "Loading…";
+    root.innerHTML = "";
+    try{
+      const res = await fetch(url, {cache:'no-store'});
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const raw = await res.json();
+
+      let data = (Array.isArray(raw)? raw:[]).filter(ev => !isGarbage(ev));
+
+      const q = (qInput.value||'').toLowerCase().trim();
+      const st = (stateSel.value||'').toUpperCase();
+      const onlyUpcoming = upcomingChk.checked;
+      const now = dayjs().tz(tz);
+
+      if (st) data = data.filter(ev => (ev.state||'').toUpperCase() === st);
+      if (q) {
+        data = data.filter(ev => {
+          const blob = [ev.teamA, ev.teamB, ev.city, ev.state, ev.description].join(' ').toLowerCase();
+          return blob.includes(q);
+        });
+      }
+      if (onlyUpcoming) {
+        data = data.filter(ev=>{
+          if (!ev.kick) return false;
+          const m = /z$/i.test(ev.kick) ? dayjs.utc(ev.kick).tz(tz) : dayjs.tz(ev.kick, tz);
+          return !m.isValid() || m.isAfter(now);
+        });
+      }
+
+      const byState = {};
+      for(const ev of data){
+        const s = (ev.state||'').toUpperCase();
+        (byState[s] ||= []).push(ev);
+      }
+      Object.values(byState).forEach(arr=>{
+        arr.sort((a,b)=>{
+          const ta = a.kick ? (/z$/i.test(a.kick)? dayjs.utc(a.kick).valueOf(): dayjs(a.kick).valueOf()) : 0;
+          const tb = b.kick ? (/z$/i.test(b.kick)? dayjs.utc(b.kick).valueOf(): dayjs(b.kick).valueOf()) : 0;
+          return ta - tb;
+        });
+      });
+
+      const states = Object.keys(byState).sort();
+      statusEl.textContent = "";
+      if (states.length===0){
+        root.innerHTML = `<div style="color:#64748b">No games found for this filter.</div>`;
+        return;
+      }
+
+      root.innerHTML = states.map(st=>{
+        const cards = byState[st].map(ev=>`
+          <div class="card">
+            <div class="teams">
+              ${teamLine(ev.teamA, ev.mascotA)} <span class="vs">vs</span> ${teamLine(ev.teamB, ev.mascotB)}
+            </div>
+            <div class="meta">
+              <div>🕒 ${fmtKick(ev.kick, tz)}</div>
+              <div>📍 ${locText(ev)}</div>
+            </div>
+            ${ev.description? `<p class="desc">${ev.description}</p>`: ''}
+          </div>
+        `).join('');
+        return `<div class="state">
+          <div class="state-title">${st || '(Unknown state)'}</div>
+          <div class="grid">${cards}</div>
+        </div>`;
+      }).join('');
+    }catch(err){
+      statusEl.textContent = "Failed to load JSON. Make sure the date exists.";
+      console.error(err);
+    }
+  }
+
+  prevBtn.onclick = ()=>{ current = current.add(-1,'day'); load(); };
+  nextBtn.onclick = ()=>{ current = current.add(1,'day'); load(); };
+  tzSel.onchange = load;
+  qInput.oninput = () => { load(); };
+  stateSel.onchange = load;
+  upcomingChk.onchange = load;
+
+  load();
+</script>
+</body>
+</html>
