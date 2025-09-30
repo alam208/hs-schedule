@@ -27,10 +27,12 @@ jobs:
   build:
     runs-on: ubuntu-latest
     env:
-      TZ: America/New_York   # gunakan US Eastern sebagai tanggal acuan
+      TZ: America/New_York   # tanggal acuan ET (cocokkan dg frontend)
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0      # <— perlu untuk commit balik
 
       - name: Set Python
         uses: actions/setup-python@v5
@@ -48,35 +50,35 @@ jobs:
           if [ -n "${{ github.event.inputs.date }}" ]; then
             DATE_IN="${{ github.event.inputs.date }}"
           else
-            DATE_IN=$(date +"%m/%d/%Y")   # tanggal "hari ini" di ET
+            DATE_IN=$(date +"%m/%d/%Y")
           fi
-          if [ -n "${{ github.event.inputs.states }}" ]; then
-            STATES_IN="${{ github.event.inputs.states }}"
-          else
-            STATES_IN=""
-          fi
+          STATES_IN="${{ github.event.inputs.states }}"
           echo "date=${DATE_IN}" >> $GITHUB_OUTPUT
           echo "states=${STATES_IN}" >> $GITHUB_OUTPUT
           echo "Using ET date=$DATE_IN states=$STATES_IN"
 
       - name: Run scraper (today)
         run: |
+          mkdir -p data
           python scraper/maxpreps_to_json.py \
             --date "${{ steps.args.outputs.date }}" \
             $([ -n "${{ steps.args.outputs.states }}" ] && echo --states "${{ steps.args.outputs.states }}") \
             --outdir "data"
 
-      # (Opsional) build file untuk besok juga
-      #- name: Run scraper (tomorrow, optional)
-      #  if: ${{ !github.event.inputs.date }}
-      #  run: |
-      #    TOMORROW_ET=$(date -d "tomorrow" +"%m/%d/%Y")
-      #    python scraper/maxpreps_to_json.py --date "$TOMORROW_ET" --outdir "data"
+      # ===== Persist hasil ke repo (biar file lama tetap ada) =====
+      - name: Persist data to repo
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          git commit -m "data: update feeds for ${{ steps.args.outputs.date || 'today(ET)' }} ${ { steps.args.outputs.states } }" || echo "no changes"
+          git push
 
       - name: Upload artifact for Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: .   # deploy seluruh repo (termasuk data/ yang baru di-commit)
 
   deploy:
     needs: build
