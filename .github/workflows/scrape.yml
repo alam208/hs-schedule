@@ -32,6 +32,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # perlu untuk commit balik
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -58,6 +60,7 @@ jobs:
       - name: Run scraper (FULL, no limit)
         run: |
           set -e
+          mkdir -p data
           python scraper/maxpreps_to_json.py \
             --date "${{ steps.args.outputs.date }}" \
             $([ -n "${{ steps.args.outputs.states }}" ] && echo --states "${{ steps.args.outputs.states }}") \
@@ -65,10 +68,20 @@ jobs:
           echo "==== List data/ ===="
           ls -lah data || true
 
+      # ⬇️ Tambahan: simpan hasil ke repo agar persist antar-deploy
+      - name: Persist data to repo
+        run: |
+          set -e
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A data
+          git commit -m "data: update feeds for ${{ steps.args.outputs.date }} (states: ${{ steps.args.outputs.states || 'all' }})" || echo "no changes"
+          git push
+
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: .
+          path: .   # seluruh repo + data/ yang sudah ter-commit
 
   deploy:
     needs: build
